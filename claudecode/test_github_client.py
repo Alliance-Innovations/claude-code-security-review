@@ -5,6 +5,7 @@ Unit tests for GitHubActionClient.
 
 import pytest
 import os
+import requests
 from unittest.mock import Mock, patch
 
 from claudecode.github_action_audit import GitHubActionClient
@@ -240,6 +241,176 @@ index 333..444 100644
         assert '@generated' not in result
         assert 'More generated code' not in result
     
+    @patch('requests.get')
+    def test_get_pr_data_follows_files_pagination(self, mock_get):
+        """Test that PR files are collected across every page of the files endpoint."""
+        pr_response = Mock()
+        pr_response.json.return_value = {
+            'number': 123,
+            'title': 'Huge PR',
+            'body': 'Many files',
+            'user': {'login': 'testuser'},
+            'created_at': '2024-01-01T00:00:00Z',
+            'updated_at': '2024-01-01T01:00:00Z',
+            'state': 'open',
+            'head': {'ref': 'feature', 'sha': 'abc123', 'repo': {'full_name': 'owner/repo'}},
+            'base': {'ref': 'main', 'sha': 'def456'},
+            'additions': 1020,
+            'deletions': 0,
+            'changed_files': 102
+        }
+
+        def make_file(i):
+            return {
+                'filename': f'file{i}.py',
+                'status': 'added',
+                'additions': 10,
+                'deletions': 0,
+                'changes': 10,
+                'patch': f'@@ -0,0 +1,10 @@\n+# File {i}'
+            }
+
+        next_url = 'https://api.github.com/repos/owner/repo/pulls/123/files?per_page=100&page=2'
+
+        page1 = Mock()
+        page1.json.return_value = [make_file(i) for i in range(100)]
+        page1.links = {'next': {'url': next_url}}
+
+        page2 = Mock()
+        page2.json.return_value = [make_file(i) for i in range(100, 102)]
+        page2.links = {}
+
+        mock_get.side_effect = [pr_response, page1, page2]
+
+        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
+            client = GitHubActionClient()
+            result = client.get_pr_data('owner/repo', 123)
+
+        # Both pages were requested, the second via the Link rel="next" URL
+        assert mock_get.call_count == 3
+        mock_get.assert_any_call(
+            'https://api.github.com/repos/owner/repo/pulls/123/files?per_page=100',
+            headers=client.headers
+        )
+        mock_get.assert_any_call(next_url, headers=client.headers)
+
+        # Files from both pages are present, in order
+        assert len(result['files']) == 102
+        assert result['files'][0]['filename'] == 'file0.py'
+        assert result['files'][101]['filename'] == 'file101.py'
+
+    @patch('requests.get')
+    def test_get_pr_diff_falls_back_to_file_patches_on_406(self, mock_get, capsys):
+        """Test that a 406 (diff over GitHub's 20,000-line limit) falls back to per-file patches."""
+        diff_response = Mock()
+        diff_response.status_code = 406
+        diff_response.raise_for_status.side_effect = requests.HTTPError(
+            '406 Client Error: Not Acceptable for url: ...', response=diff_response
+        )
+
+        files_response = Mock()
+        files_response.links = {}
+        files_response.json.return_value = [
+            {
+                'filename': 'src/main.py',
+                'status': 'modified',
+                'additions': 3,
+                'deletions': 1,
+                'changes': 4,
+                'patch': '@@ -1,5 +1,7 @@\n+import os'
+            },
+            {
+                'filename': 'src/new_module.py',
+                'status': 'added',
+                'additions': 2,
+                'deletions': 0,
+                'changes': 2,
+                'patch': '@@ -0,0 +1,2 @@\n+def added():'
+            },
+            {
+                'filename': 'src/old_module.py',
+                'status': 'removed',
+                'additions': 0,
+                'deletions': 2,
+                'changes': 2,
+                'patch': '@@ -1,2 +0,0 @@\n-def removed():'
+            },
+            {
+                'filename': 'src/renamed_new.py',
+                'previous_filename': 'src/renamed_old.py',
+                'status': 'renamed',
+                'additions': 1,
+                'deletions': 1,
+                'changes': 2,
+                'patch': '@@ -1,1 +1,1 @@\n+renamed_content'
+            },
+            {
+                'filename': 'assets/logo.png',
+                'status': 'modified',
+                'additions': 0,
+                'deletions': 0,
+                'changes': 0
+                # no 'patch' key - binary file
+            }
+        ]
+
+        mock_get.side_effect = [diff_response, files_response]
+
+        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
+            client = GitHubActionClient()
+            result = client.get_pr_diff('owner/repo', 123)
+
+        # Fallback hit the files endpoint after the diff request
+        assert mock_get.call_count == 2
+
+        # Modified file
+        assert 'diff --git a/src/main.py b/src/main.py' in result
+        assert '--- a/src/main.py\n+++ b/src/main.py' in result
+        assert '+import os' in result
+
+        # Added file
+        assert 'diff --git a/src/new_module.py b/src/new_module.py' in result
+        assert '--- /dev/null\n+++ b/src/new_module.py' in result
+        assert '+def added():' in result
+
+        # Removed file
+        assert 'diff --git a/src/old_module.py b/src/old_module.py' in result
+        assert '--- a/src/old_module.py\n+++ /dev/null' in result
+        assert '-def removed():' in result
+
+        # Renamed file uses previous_filename on the a/ side
+        assert 'diff --git a/src/renamed_new.py b/src/renamed_new.py' in result
+        assert '--- a/src/renamed_old.py\n+++ b/src/renamed_new.py' in result
+        assert '+renamed_content' in result
+
+        # File without a patch gets the header plus an explanatory comment
+        assert 'diff --git a/assets/logo.png b/assets/logo.png' in result
+        assert '# Patch omitted by GitHub' in result
+
+        # Informational line explaining the fallback
+        stderr = capsys.readouterr().err
+        assert '[Info]' in stderr
+        assert '20,000-line' in stderr
+        assert 'per-file patches' in stderr
+
+    @patch('requests.get')
+    def test_get_pr_diff_raises_on_non_406_error(self, mock_get):
+        """Test that a non-406 HTTP error still propagates instead of falling back."""
+        diff_response = Mock()
+        diff_response.status_code = 500
+        diff_response.raise_for_status.side_effect = requests.HTTPError(
+            '500 Server Error: Internal Server Error for url: ...', response=diff_response
+        )
+        mock_get.return_value = diff_response
+
+        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
+            client = GitHubActionClient()
+            with pytest.raises(requests.HTTPError, match='500 Server Error'):
+                client.get_pr_diff('owner/repo', 123)
+
+        # No fallback request was made
+        assert mock_get.call_count == 1
+
     def test_filter_generated_files_edge_cases(self):
         """Test edge cases in generated file filtering."""
         with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
