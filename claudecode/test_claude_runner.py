@@ -437,3 +437,51 @@ class TestClaudeRunnerEdgeCases:
         assert success is False
         assert 'Unexpected error' in error
         assert results == {}
+
+
+class TestRunnerUsage:
+    """Cost/usage capture from the Claude Code result envelope."""
+
+    @patch('subprocess.run')
+    def test_usage_accumulates_across_attempts(self, mock_run):
+        envelope = lambda cost, result: json.dumps({
+            'type': 'result', 'subtype': 'success', 'is_error': False, 'result': result,
+            'total_cost_usd': cost, 'duration_ms': 1000, 'num_turns': 2,
+            'usage': {'input_tokens': 100, 'output_tokens': 10,
+                      'cache_creation_input_tokens': 5, 'cache_read_input_tokens': 50},
+        })
+        findings = json.dumps({'findings': [], 'analysis_summary': {}})
+        mock_run.side_effect = [
+            Mock(returncode=0, stdout=envelope(0.25, findings), stderr=''),
+        ]
+        runner = SimpleClaudeRunner()
+        with patch('pathlib.Path.exists', return_value=True):
+            success, _, _ = runner.run_security_audit(Path('/tmp/test'), 'p')
+        assert success is True
+        assert runner.usage['runs'] == 1
+        assert runner.usage['total_cost_usd'] == 0.25
+        assert runner.usage['input_tokens'] == 100
+        assert runner.usage['cache_read_input_tokens'] == 50
+
+        # a PROMPT_TOO_LONG attempt is billed too and must be counted
+        mock_run.side_effect = [
+            Mock(returncode=0, stdout=json.dumps({'type': 'result', 'subtype': 'success', 'is_error': True,
+                                                  'result': 'Prompt is too long', 'total_cost_usd': 0.05,
+                                                  'duration_ms': 10, 'num_turns': 1,
+                                                  'usage': {'input_tokens': 1, 'output_tokens': 1}}), stderr=''),
+        ]
+        with patch('pathlib.Path.exists', return_value=True):
+            success, err, _ = runner.run_security_audit(Path('/tmp/test'), 'p')
+        assert err == 'PROMPT_TOO_LONG'
+        assert runner.usage['runs'] == 2
+        assert abs(runner.usage['total_cost_usd'] - 0.30) < 1e-9
+        assert runner.usage['duration_ms'] == 1010
+
+    @patch('subprocess.run')
+    def test_usage_absent_fields_are_ignored(self, mock_run):
+        mock_run.return_value = Mock(returncode=0, stdout=json.dumps({'type': 'result', 'result': '{"findings": []}'}), stderr='')
+        runner = SimpleClaudeRunner()
+        with patch('pathlib.Path.exists', return_value=True):
+            runner.run_security_audit(Path('/tmp/test'), 'p')
+        assert runner.usage['runs'] == 1
+        assert runner.usage['total_cost_usd'] == 0.0

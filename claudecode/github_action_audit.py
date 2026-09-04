@@ -264,6 +264,29 @@ class SimpleClaudeRunner:
             self.timeout_seconds = timeout_minutes * 60
         else:
             self.timeout_seconds = SUBPROCESS_TIMEOUT
+        # Summed over every `claude` invocation this runner makes (retries and the
+        # PROMPT_TOO_LONG first attempt included — those are billed too).
+        self.usage = {
+            'runs': 0, 'total_cost_usd': 0.0, 'duration_ms': 0, 'num_turns': 0,
+            'input_tokens': 0, 'output_tokens': 0,
+            'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0,
+        }
+
+    def _record_usage(self, envelope: Any) -> None:
+        """Accumulate cost/usage from a Claude Code `--output-format json` result envelope."""
+        if not isinstance(envelope, dict) or envelope.get('type') != 'result':
+            return
+        self.usage['runs'] += 1
+        for key in ('total_cost_usd', 'duration_ms', 'num_turns'):
+            value = envelope.get(key)
+            if isinstance(value, (int, float)):
+                self.usage[key] += value
+        usage = envelope.get('usage')
+        if isinstance(usage, dict):
+            for key in ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'):
+                value = usage.get(key)
+                if isinstance(value, (int, float)):
+                    self.usage[key] += value
     
     def run_security_audit(self, repo_dir: Path, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
         """Run Claude Code security audit.
@@ -320,6 +343,7 @@ class SimpleClaudeRunner:
                 success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
                 
                 if success:
+                    self._record_usage(parsed_result)
                     # Check for "Prompt is too long" error that should trigger retry without diff
                     if (isinstance(parsed_result, dict) and 
                         parsed_result.get('type') == 'result' and 
@@ -519,6 +543,12 @@ def run_security_audit(claude_runner: SimpleClaudeRunner, prompt: str) -> Dict[s
     return results
 
 
+def _usage_of(obj: Any) -> Optional[Dict[str, Any]]:
+    """The `usage` dict a runner/API client accumulated, or None when there is none."""
+    usage = getattr(obj, 'usage', None)
+    return usage if isinstance(usage, dict) else None
+
+
 def apply_findings_filter(findings_filter, original_findings: List[Dict[str, Any]], 
                          pr_context: Dict[str, Any], github_client: GitHubActionClient) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """Apply findings filter to reduce false positives.
@@ -691,6 +721,13 @@ def main():
                 'kept_findings': len(kept_findings),
                 'filter_analysis': analysis_summary,
                 'excluded_findings_details': excluded_findings  # Include full details of what was filtered
+            },
+            # What this scan cost: the Claude Code review (USD as reported by the CLI)
+            # plus the false-positive filter's API calls (tokens only; the SDK reports
+            # no price). `filter` is None when Claude filtering was disabled.
+            'cost': {
+                'review': _usage_of(claude_runner),
+                'filter': _usage_of(getattr(findings_filter, 'claude_client', None)),
             }
         }
         
