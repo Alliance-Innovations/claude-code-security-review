@@ -48,6 +48,21 @@ class ClaudeAPIClient:
         
         # Initialize Anthropic client
         self.client = Anthropic(api_key=self.api_key)
+        # Token usage summed over every successful messages.create in this client
+        self.usage = {
+            'calls': 0, 'input_tokens': 0, 'output_tokens': 0,
+            'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0,
+        }
+
+    def _record_usage(self, response: Any) -> None:
+        usage = getattr(response, 'usage', None)
+        if usage is None:
+            return
+        self.usage['calls'] += 1
+        for key in ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'):
+            value = getattr(usage, key, None)
+            if isinstance(value, (int, float)):
+                self.usage[key] += value
         logger.info("Claude API client initialized successfully")
     
     def validate_api_access(self) -> Tuple[bool, str]:
@@ -112,6 +127,7 @@ class ClaudeAPIClient:
                 start_time = time.time()
                 response = self.client.messages.create(**api_params)
                 duration = time.time() - start_time
+                self._record_usage(response)
                 
                 # Extract text from response
                 response_text = ""
