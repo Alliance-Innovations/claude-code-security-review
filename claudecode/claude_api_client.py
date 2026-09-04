@@ -57,9 +57,11 @@ class ClaudeAPIClient:
             Tuple of (success, error_message)
         """
         try:
-            # Simple test call to verify API access
+            # Simple test call to verify API access. Probe with the configured model:
+            # a hardcoded retired model id (claude-3-5-haiku-20241022) 404s, which
+            # silently disabled Claude-based false-positive filtering on every run.
             self.client.messages.create(
-                model="claude-3-5-haiku-20241022",
+                model=self.model,
                 max_tokens=10,
                 messages=[{"role": "user", "content": "Hello"}],
                 timeout=10
