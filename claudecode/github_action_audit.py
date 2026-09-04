@@ -157,12 +157,12 @@ class GitHubActionClient:
         try:
             response.raise_for_status()
         except requests.HTTPError:
-            # GitHub refuses the diff media type once a PR exceeds 20,000 lines or 300 files.
+            # GitHub refuses the diff media type once a PR diff exceeds 20,000 lines (or 300 files).
             if getattr(response, 'status_code', None) != 406:
                 raise
             print(
-                "[Info] GitHub returned 406 for the PR diff (diff exceeds GitHub's 20,000-line "
-                "limit); assembling the diff from per-file patches instead.",
+                "[Info] GitHub returned 406 for the PR diff (diff exceeds GitHub's 20,000-line / "
+                "300-file limit); assembling the diff from per-file patches instead.",
                 file=sys.stderr
             )
             return self._filter_generated_files(self._build_diff_from_files(repo_name, pr_number))
@@ -185,15 +185,13 @@ class GitHubActionClient:
             filename = file_data['filename']
             status = file_data.get('status', 'modified')
 
-            if status == 'added':
-                old_path = '/dev/null'
-            elif status == 'renamed':
-                old_path = f"a/{file_data.get('previous_filename', filename)}"
-            else:
-                old_path = f"a/{filename}"
+            old_name = filename
+            if status in ('renamed', 'copied'):
+                old_name = file_data.get('previous_filename', filename)
+            old_path = '/dev/null' if status == 'added' else f"a/{old_name}"
             new_path = '/dev/null' if status == 'removed' else f"b/{filename}"
 
-            header = f"diff --git a/{filename} b/{filename}\n--- {old_path}\n+++ {new_path}"
+            header = f"diff --git a/{old_name} b/{filename}\n--- {old_path}\n+++ {new_path}"
             patch = file_data.get('patch')
             if patch:
                 sections.append(f"{header}\n{patch}")

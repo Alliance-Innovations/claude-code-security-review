@@ -379,7 +379,7 @@ index 333..444 100644
         assert '-def removed():' in result
 
         # Renamed file uses previous_filename on the a/ side
-        assert 'diff --git a/src/renamed_new.py b/src/renamed_new.py' in result
+        assert 'diff --git a/src/renamed_old.py b/src/renamed_new.py' in result
         assert '--- a/src/renamed_old.py\n+++ b/src/renamed_new.py' in result
         assert '+renamed_content' in result
 
