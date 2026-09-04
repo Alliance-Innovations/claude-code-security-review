@@ -74,12 +74,9 @@ class GitHubActionClient:
         response.raise_for_status()
         pr_data = response.json()
         
-        # Get PR files with pagination support
-        files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
-        response = requests.get(files_url, headers=self.headers)
-        response.raise_for_status()
-        files_data = response.json()
-        
+        # Get PR files (all pages)
+        files_data = self._get_pr_files(repo_name, pr_number)
+
         return {
             'number': pr_data['number'],
             'title': pr_data['title'],
@@ -116,25 +113,93 @@ class GitHubActionClient:
             'changed_files': pr_data['changed_files']
         }
     
-    def get_pr_diff(self, repo_name: str, pr_number: int) -> str:
-        """Get complete PR diff in unified format.
-        
+    def _get_pr_files(self, repo_name: str, pr_number: int) -> List[Dict[str, Any]]:
+        """Get every changed file of a PR, following pagination.
+
         Args:
             repo_name: Repository name in format "owner/repo"
             pr_number: Pull request number
-            
+
+        Returns:
+            List of the GitHub file objects across all pages
+        """
+        url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
+        files: List[Dict[str, Any]] = []
+
+        while url:
+            response = requests.get(url, headers=self.headers)
+            response.raise_for_status()
+            page = response.json()
+            files.extend(page)
+
+            # requests parses the Link header into a dict; anything else means no pagination info.
+            links = getattr(response, 'links', None)
+            next_link = links.get('next') if isinstance(links, dict) else None
+            url = next_link.get('url') if next_link else None
+
+        return files
+
+    def get_pr_diff(self, repo_name: str, pr_number: int) -> str:
+        """Get complete PR diff in unified format.
+
+        Args:
+            repo_name: Repository name in format "owner/repo"
+            pr_number: Pull request number
+
         Returns:
             Complete PR diff in unified format
         """
         url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
         headers = dict(self.headers)
         headers['Accept'] = 'application/vnd.github.diff'
-        
+
         response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            # GitHub refuses the diff media type once a PR diff exceeds 20,000 lines (or 300 files).
+            if getattr(response, 'status_code', None) != 406:
+                raise
+            print(
+                "[Info] GitHub returned 406 for the PR diff (diff exceeds GitHub's 20,000-line / "
+                "300-file limit); assembling the diff from per-file patches instead.",
+                file=sys.stderr
+            )
+            return self._filter_generated_files(self._build_diff_from_files(repo_name, pr_number))
+
         return self._filter_generated_files(response.text)
-    
+
+    def _build_diff_from_files(self, repo_name: str, pr_number: int) -> str:
+        """Assemble a unified diff from the per-file patches of the files endpoint.
+
+        Args:
+            repo_name: Repository name in format "owner/repo"
+            pr_number: Pull request number
+
+        Returns:
+            Unified diff text assembled from each file's patch
+        """
+        sections = []
+
+        for file_data in self._get_pr_files(repo_name, pr_number):
+            filename = file_data['filename']
+            status = file_data.get('status', 'modified')
+
+            old_name = filename
+            if status in ('renamed', 'copied'):
+                old_name = file_data.get('previous_filename', filename)
+            old_path = '/dev/null' if status == 'added' else f"a/{old_name}"
+            new_path = '/dev/null' if status == 'removed' else f"b/{filename}"
+
+            header = f"diff --git a/{old_name} b/{filename}\n--- {old_path}\n+++ {new_path}"
+            patch = file_data.get('patch')
+            if patch:
+                sections.append(f"{header}\n{patch}")
+            else:
+                sections.append(f"{header}\n# Patch omitted by GitHub (binary file or patch too large)")
+
+        return '\n'.join(sections)
+
     def _is_excluded(self, filepath: str) -> bool:
         """Check if a file should be excluded based on directory patterns."""
         for excluded_dir in self.excluded_dirs:
