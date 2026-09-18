@@ -517,9 +517,15 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
     try:
         # Check if we should use Claude API filtering
         use_claude_filtering = os.environ.get('ENABLE_CLAUDE_FILTERING', 'false').lower() == 'true'
+        # May be absent under keyless auth; the client resolves environment
+        # credentials in that case. Do NOT gate filtering on it -- requiring a
+        # key here silently turns the false-positive filter OFF under workload
+        # identity federation, which reads as a clean scan with noisier findings
+        # rather than as a failure. FindingsFilter already degrades to hard rules
+        # on its own if the credential turns out not to work.
         api_key = os.environ.get('ANTHROPIC_API_KEY')
         
-        if use_claude_filtering and api_key:
+        if use_claude_filtering:
             # Use full filtering with Claude API
             return FindingsFilter(
                 use_hard_exclusions=True,
