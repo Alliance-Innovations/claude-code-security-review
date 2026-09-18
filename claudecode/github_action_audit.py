@@ -328,6 +328,27 @@ class SimpleClaudeRunner:
                     timeout=self.timeout_seconds
                 )
                 
+                # Parse BEFORE branching on the return code. The CLI writes its
+                # result envelope to stdout and STILL exits non-zero on an API
+                # error, so a prompt-too-long detected only on the returncode==0
+                # path is unreachable: the loop burns all three retries resending
+                # the same oversized prompt and reports the generic "execution
+                # failed with return code 1" instead of falling back.
+                success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
+                if success:
+                    self._record_usage(parsed_result)
+
+                # Match the PREFIX, not the whole string. The CLI now appends the
+                # measured counts - "Prompt is too long \u00b7 the request is
+                # ~1199699 tokens (limit 1000000) ..." - so the old equality test
+                # could never fire again. Measured on nexus-status, where a PR
+                # carrying build artifacts produced a 1.2M-token prompt.
+                if (success and isinstance(parsed_result, dict) and
+                        parsed_result.get('type') == 'result' and
+                        parsed_result.get('is_error') and
+                        str(parsed_result.get('result') or '').startswith('Prompt is too long')):
+                    return False, "PROMPT_TOO_LONG", {}
+
                 if result.returncode != 0:
                     if attempt == NUM_RETRIES - 1:
                         error_details = f"Claude Code execution failed with return code {result.returncode}\n"
@@ -338,20 +359,8 @@ class SimpleClaudeRunner:
                         time.sleep(5*attempt)
                         # Note: We don't do exponential backoff here to keep the runtime reasonable
                         continue  # Retry
-                
-                # Parse JSON output
-                success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
-                
+
                 if success:
-                    self._record_usage(parsed_result)
-                    # Check for "Prompt is too long" error that should trigger retry without diff
-                    if (isinstance(parsed_result, dict) and 
-                        parsed_result.get('type') == 'result' and 
-                        parsed_result.get('subtype') == 'success' and
-                        parsed_result.get('is_error') and
-                        parsed_result.get('result') == 'Prompt is too long'):
-                        return False, "PROMPT_TOO_LONG", {}
-                    
                     # Check for error_during_execution that should trigger retry
                     if (isinstance(parsed_result, dict) and 
                         parsed_result.get('type') == 'result' and 

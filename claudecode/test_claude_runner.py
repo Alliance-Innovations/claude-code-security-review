@@ -64,7 +64,10 @@ class TestSimpleClaudeRunner:
             success, error = runner.validate_claude_available()
         
         assert success is False
-        assert 'ANTHROPIC_API_KEY environment variable is not set' in error
+        # Since #116 the check accepts a federated credential too, so the
+        # message names both routes rather than the key alone.
+        assert 'No Anthropic credentials configured' in error
+        assert 'ANTHROPIC_FEDERATION_RULE_ID' in error
     
     @patch('subprocess.run')
     def test_validate_claude_available_not_installed(self, mock_run):
@@ -476,6 +479,29 @@ class TestRunnerUsage:
         assert runner.usage['runs'] == 2
         assert abs(runner.usage['total_cost_usd'] - 0.30) < 1e-9
         assert runner.usage['duration_ms'] == 1010
+
+    @patch('subprocess.run')
+    def test_prompt_too_long_is_caught_on_a_nonzero_exit_with_counts(self, mock_run):
+        """The real shape: the CLI exits 1 AND appends the token counts.
+
+        Both halves defeated the original check - it only looked at stdout when
+        the exit code was 0, and it compared the message for equality. Without
+        the fix this burns three retries and returns the generic return-code
+        error, so the caller never drops the diff and the PR gets no review.
+        """
+        envelope = json.dumps({
+            'type': 'result', 'subtype': 'success', 'is_error': True,
+            'api_error_status': 400, 'duration_ms': 562, 'num_turns': 1,
+            'result': ('Prompt is too long \u00b7 the request is ~1199699 tokens '
+                       '(limit 1000000) but this conversation is only ~436850 tokens'),
+        })
+        mock_run.return_value = Mock(returncode=1, stdout=envelope, stderr='')
+        runner = SimpleClaudeRunner()
+        with patch('pathlib.Path.exists', return_value=True):
+            success, err, _ = runner.run_security_audit(Path('/tmp/test'), 'p')
+        assert success is False
+        assert err == 'PROMPT_TOO_LONG'
+        assert mock_run.call_count == 1, 'must not retry the same oversized prompt'
 
     @patch('subprocess.run')
     def test_usage_absent_fields_are_ignored(self, mock_run):
