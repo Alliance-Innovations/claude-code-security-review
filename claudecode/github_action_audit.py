@@ -328,6 +328,27 @@ class SimpleClaudeRunner:
                     timeout=self.timeout_seconds
                 )
                 
+                # Parse BEFORE branching on the return code. The CLI writes its
+                # result envelope to stdout and STILL exits non-zero on an API
+                # error, so a prompt-too-long detected only on the returncode==0
+                # path is unreachable: the loop burns all three retries resending
+                # the same oversized prompt and reports the generic "execution
+                # failed with return code 1" instead of falling back.
+                success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
+                if success:
+                    self._record_usage(parsed_result)
+
+                # Match the PREFIX, not the whole string. The CLI now appends the
+                # measured counts - "Prompt is too long \u00b7 the request is
+                # ~1199699 tokens (limit 1000000) ..." - so the old equality test
+                # could never fire again. Measured on nexus-status, where a PR
+                # carrying build artifacts produced a 1.2M-token prompt.
+                if (success and isinstance(parsed_result, dict) and
+                        parsed_result.get('type') == 'result' and
+                        parsed_result.get('is_error') and
+                        str(parsed_result.get('result') or '').startswith('Prompt is too long')):
+                    return False, "PROMPT_TOO_LONG", {}
+
                 if result.returncode != 0:
                     if attempt == NUM_RETRIES - 1:
                         error_details = f"Claude Code execution failed with return code {result.returncode}\n"
@@ -338,20 +359,8 @@ class SimpleClaudeRunner:
                         time.sleep(5*attempt)
                         # Note: We don't do exponential backoff here to keep the runtime reasonable
                         continue  # Retry
-                
-                # Parse JSON output
-                success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
-                
+
                 if success:
-                    self._record_usage(parsed_result)
-                    # Check for "Prompt is too long" error that should trigger retry without diff
-                    if (isinstance(parsed_result, dict) and 
-                        parsed_result.get('type') == 'result' and 
-                        parsed_result.get('subtype') == 'success' and
-                        parsed_result.get('is_error') and
-                        parsed_result.get('result') == 'Prompt is too long'):
-                        return False, "PROMPT_TOO_LONG", {}
-                    
                     # Check for error_during_execution that should trigger retry
                     if (isinstance(parsed_result, dict) and 
                         parsed_result.get('type') == 'result' and 
@@ -412,10 +421,29 @@ class SimpleClaudeRunner:
             )
             
             if result.returncode == 0:
-                # Also check if API key is configured
-                api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-                if not api_key:
-                    return False, "ANTHROPIC_API_KEY environment variable is not set"
+                # Accept either a static credential or keyless / environment-based
+                # auth (e.g. Workload Identity Federation, ANTHROPIC_AUTH_TOKEN),
+                # which the Claude CLI and Anthropic SDK resolve from the
+                # environment.
+                has_static_credential = bool(
+                    os.environ.get('ANTHROPIC_API_KEY')
+                    or os.environ.get('ANTHROPIC_AUTH_TOKEN')
+                )
+                has_wif = all(
+                    os.environ.get(var)
+                    for var in (
+                        'ANTHROPIC_FEDERATION_RULE_ID',
+                        'ANTHROPIC_ORGANIZATION_ID',
+                        'ANTHROPIC_SERVICE_ACCOUNT_ID',
+                    )
+                )
+                if not (has_static_credential or has_wif):
+                    return False, (
+                        "No Anthropic credentials configured. Set ANTHROPIC_API_KEY, "
+                        "or configure Workload Identity Federation "
+                        "(ANTHROPIC_FEDERATION_RULE_ID / ANTHROPIC_ORGANIZATION_ID / "
+                        "ANTHROPIC_SERVICE_ACCOUNT_ID)."
+                    )
                 return True, ""
             else:
                 error_msg = f"Claude Code returned exit code {result.returncode}"
@@ -498,9 +526,15 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
     try:
         # Check if we should use Claude API filtering
         use_claude_filtering = os.environ.get('ENABLE_CLAUDE_FILTERING', 'false').lower() == 'true'
+        # May be absent under keyless auth; the client resolves environment
+        # credentials in that case. Do NOT gate filtering on it -- requiring a
+        # key here silently turns the false-positive filter OFF under workload
+        # identity federation, which reads as a clean scan with noisier findings
+        # rather than as a failure. FindingsFilter already degrades to hard rules
+        # on its own if the credential turns out not to work.
         api_key = os.environ.get('ANTHROPIC_API_KEY')
         
-        if use_claude_filtering and api_key:
+        if use_claude_filtering:
             # Use full filtering with Claude API
             return FindingsFilter(
                 use_hard_exclusions=True,
