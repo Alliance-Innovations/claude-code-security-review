@@ -327,7 +327,10 @@ class SimpleClaudeRunner:
                     cwd=repo_dir,
                     capture_output=True,
                     text=True,
-                    timeout=self.timeout_seconds
+                    timeout=self.timeout_seconds,
+                    # The CLI ranks this env var above --effort, so pin it too:
+                    # an inherited value would otherwise override the flag.
+                    env={**os.environ, 'CLAUDE_CODE_EFFORT_LEVEL': DEFAULT_CLAUDE_EFFORT},
                 )
                 
                 # Parse BEFORE branching on the return code. The CLI writes its

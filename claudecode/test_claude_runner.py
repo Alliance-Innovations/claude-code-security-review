@@ -175,6 +175,7 @@ class TestSimpleClaudeRunner:
         ]
         assert call_args[1]['input'] == 'test prompt'
         assert call_args[1]['cwd'] == Path('/tmp/test')
+        assert call_args[1]['env']['CLAUDE_CODE_EFFORT_LEVEL'] == DEFAULT_CLAUDE_EFFORT
     
     @patch('subprocess.run')
     def test_run_security_audit_large_prompt_warning(self, mock_run, capsys):
