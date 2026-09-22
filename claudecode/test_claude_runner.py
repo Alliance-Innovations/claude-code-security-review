@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 from claudecode.github_action_audit import SimpleClaudeRunner
-from claudecode.constants import DEFAULT_CLAUDE_MODEL
+from claudecode.constants import DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_EFFORT
 
 
 class TestSimpleClaudeRunner:
@@ -170,6 +170,7 @@ class TestSimpleClaudeRunner:
             'claude',
             '--output-format', 'json',
             '--model', DEFAULT_CLAUDE_MODEL,
+            '--effort', DEFAULT_CLAUDE_EFFORT,
             '--disallowed-tools', 'Bash(ps:*)'
         ]
         assert call_args[1]['input'] == 'test prompt'

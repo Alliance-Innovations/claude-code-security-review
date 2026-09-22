@@ -29,7 +29,7 @@ inputs:
     default: ''
 
   claude-model:
-    description: 'Claude model to use for security analysis (e.g., claude-sonnet-4-20250514)'
+    description: 'Claude model to use for security analysis (e.g., claude-opus-5-5)'
     required: false
     default: ''
 
@@ -158,7 +158,9 @@ runs:
       if: steps.claudecode-check.outputs.enable_claudecode == 'true'
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 pinned to commit hash
       with:
-        node-version: '18'
+        # 22: Claude Code >=2.1.198 requires node>=22, and on 18 an unpinned
+        # install silently resolves to 2.1.197, which predates Opus 5.5.
+        node-version: '22'
     
     - name: Install dependencies
       shell: bash
@@ -168,7 +170,9 @@ runs:
         echo "::group::Install Deps"
         if [ "${{ steps.claudecode-check.outputs.enable_claudecode }}" == "true" ]; then
           pip install -r "$ACTION_PATH/claudecode/requirements.txt"
-          npm install -g @anthropic-ai/claude-code
+          # Pinned: the CLI decides max_tokens, effort handling and the reported
+          # cost per model, so a moving install changes the scan without a diff.
+          npm install -g @anthropic-ai/claude-code@2.1.280
         fi
         sudo apt-get update && sudo apt-get install -y jq
         echo "::endgroup::"

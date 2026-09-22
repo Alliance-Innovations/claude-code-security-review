@@ -21,6 +21,7 @@ from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.constants import (
     EXIT_CONFIGURATION_ERROR,
     DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CLAUDE_EFFORT,
     EXIT_SUCCESS,
     EXIT_GENERAL_ERROR,
     SUBPROCESS_TIMEOUT
@@ -313,6 +314,7 @@ class SimpleClaudeRunner:
                 'claude',
                 '--output-format', 'json',
                 '--model', DEFAULT_CLAUDE_MODEL,
+                '--effort', DEFAULT_CLAUDE_EFFORT,
                 '--disallowed-tools', 'Bash(ps:*)'
             ]
             
