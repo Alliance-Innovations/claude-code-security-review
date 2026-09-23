@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from claudecode.claude_api_client import ClaudeAPIClient
+from claudecode.constants import DEFAULT_CLAUDE_EFFORT
 
 
 def _response(text='{"is_false_positive": false}', **usage):
@@ -35,3 +36,29 @@ def test_response_without_usage_is_not_counted(mock_anthropic):
     ok, _, _ = client.call_with_retry('p')
     assert ok
     assert client.usage['calls'] == 0
+
+
+@patch('claudecode.claude_api_client.Anthropic')
+def test_filter_call_pins_effort_and_fails_on_a_terminal_stop(mock_anthropic):
+    client = ClaudeAPIClient(model='claude-test', api_key='k')
+    create = mock_anthropic.return_value.messages.create
+    create.return_value = SimpleNamespace(stop_reason='refusal', content=[SimpleNamespace(text='{"is_false_positive": true}')])
+    ok, text, err = client.call_with_retry('p')
+    assert (ok, text, err) == (False, '', 'stop_reason=refusal')
+    assert create.call_count == 1  # a decline is not retried
+    assert create.call_args.kwargs['extra_body'] == {'output_config': {'effort': DEFAULT_CLAUDE_EFFORT}}
+
+
+def test_effort_defaults_to_high_and_rejects_typos(monkeypatch):
+    import importlib
+    import claudecode.constants as constants
+    try:
+        monkeypatch.delenv('CLAUDE_EFFORT', raising=False)
+        assert importlib.reload(constants).DEFAULT_CLAUDE_EFFORT == 'high'
+        monkeypatch.setenv('CLAUDE_EFFORT', 'XHigh')
+        assert importlib.reload(constants).DEFAULT_CLAUDE_EFFORT == 'xhigh'
+        monkeypatch.setenv('CLAUDE_EFFORT', 'hight')
+        assert importlib.reload(constants).DEFAULT_CLAUDE_EFFORT == 'high'
+    finally:
+        monkeypatch.delenv('CLAUDE_EFFORT', raising=False)
+        importlib.reload(constants)

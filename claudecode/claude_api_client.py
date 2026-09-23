@@ -10,7 +10,7 @@ from anthropic import Anthropic
 
 from claudecode.constants import (
     DEFAULT_CLAUDE_MODEL, DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES,
-    RATE_LIMIT_BACKOFF_MAX, PROMPT_TOKEN_LIMIT,
+    RATE_LIMIT_BACKOFF_MAX, PROMPT_TOKEN_LIMIT, DEFAULT_CLAUDE_EFFORT,
 )
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.logger import get_logger
@@ -123,7 +123,11 @@ class ClaudeAPIClient:
                     "model": self.model,
                     "max_tokens": max_tokens,
                     "messages": messages,
-                    "timeout": self.timeout_seconds
+                    "timeout": self.timeout_seconds,
+                    # Same effort as the scan; Opus 5.5 would otherwise use
+                    # 'medium'. extra_body: requirements allow SDKs without a
+                    # typed output_config.
+                    "extra_body": {"output_config": {"effort": DEFAULT_CLAUDE_EFFORT}},
                 }
                 
                 if system_prompt:
@@ -134,6 +138,13 @@ class ClaudeAPIClient:
                 response = self.client.messages.create(**api_params)
                 duration = time.time() - start_time
                 self._record_usage(response)
+
+                # Thinking shares max_tokens, and a classifier decline is HTTP
+                # 200: neither is an answer, and retrying would repeat it.
+                stop = getattr(response, 'stop_reason', None)
+                if stop in ('max_tokens', 'refusal'):
+                    logger.warning(f"Claude API call ended with stop_reason={stop}")
+                    return False, "", f"stop_reason={stop}"
                 
                 # Extract text from response
                 response_text = ""

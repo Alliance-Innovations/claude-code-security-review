@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 from claudecode.github_action_audit import SimpleClaudeRunner
-from claudecode.constants import DEFAULT_CLAUDE_MODEL
+from claudecode.constants import DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_EFFORT
 
 
 class TestSimpleClaudeRunner:
@@ -170,10 +170,12 @@ class TestSimpleClaudeRunner:
             'claude',
             '--output-format', 'json',
             '--model', DEFAULT_CLAUDE_MODEL,
+            '--effort', DEFAULT_CLAUDE_EFFORT,
             '--disallowed-tools', 'Bash(ps:*)'
         ]
         assert call_args[1]['input'] == 'test prompt'
         assert call_args[1]['cwd'] == Path('/tmp/test')
+        assert call_args[1]['env']['CLAUDE_CODE_EFFORT_LEVEL'] == DEFAULT_CLAUDE_EFFORT
     
     @patch('subprocess.run')
     def test_run_security_audit_large_prompt_warning(self, mock_run, capsys):
